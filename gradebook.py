@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import TypedDict
 
 from errors import ConflictError, GradebookError, NotFoundError, ValidationError
-from models import parse_assessment, parse_mark, parse_student
+from models import Mark, parse_assessment, parse_mark, parse_student
 
 DATA = "gradebook.json"
 
@@ -62,6 +62,10 @@ def save() -> None:
         json.dump(STATE, data_file)
 
 
+def now() -> str:
+    return str(datetime.datetime.now())
+
+
 def pct(sid: str) -> str:
     total = 0.0
     got = 0.0
@@ -79,6 +83,31 @@ def pct(sid: str) -> str:
     if total == 0:
         return "0"
     return str(round(got, 2))
+
+
+def add_mark(
+    state: GradebookState,
+    mark: Mark,
+    now: Callable[[], str],
+    save: Callable[[], None],
+) -> None:
+    if mark.student not in state["students"]:
+        raise NotFoundError("student not found")
+    stored_assessment = state["assessments"].get(mark.assessment)
+    if stored_assessment is None:
+        raise NotFoundError("assessment not found")
+    assessment = parse_assessment(stored_assessment)
+    if mark.score > assessment.total:
+        raise ValidationError("score must not exceed total")
+
+    mark_record: MarkRecord = {
+        "student": mark.student,
+        "assessment": mark.assessment,
+        "score": mark.score,
+        "at": now(),
+    }
+    state["marks"].append(mark_record)
+    save()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -188,22 +217,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return 200, new_assessment_record
 
         mark = parse_mark(payload)
-        if mark.student not in STATE["students"]:
-            raise NotFoundError("student not found")
-        stored_assessment = STATE["assessments"].get(mark.assessment)
-        if stored_assessment is None:
-            raise NotFoundError("assessment not found")
-        assessment = parse_assessment(stored_assessment)
-        if mark.score > assessment.total:
-            raise ValidationError("score must not exceed total")
-        mark_record: MarkRecord = {
-            "student": mark.student,
-            "assessment": mark.assessment,
-            "score": mark.score,
-            "at": str(datetime.datetime.now()),
-        }
-        STATE["marks"].append(mark_record)
-        save()
+        add_mark(STATE, mark, now, save)
         LOGGER.info("Recorded mark for %s with score %s", mark.student, mark.score)
         return 200, {"ok": True}
 
