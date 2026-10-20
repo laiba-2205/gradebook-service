@@ -4,13 +4,48 @@ import json
 import logging
 import sys
 from collections.abc import Callable
+from typing import TypedDict
 
 from errors import ConflictError, GradebookError, NotFoundError, ValidationError
 from models import parse_assessment, parse_mark, parse_student
 
 DATA = "gradebook.json"
-STATE = {"students": {}, "assessments": {}, "marks": []}
+
+
+class StudentRecord(TypedDict):
+    id: str
+    name: str
+    joined: str
+
+
+class AssessmentRecord(TypedDict):
+    id: str
+    title: str
+    weight: object
+    total: object
+
+
+class MarkRecord(TypedDict):
+    student: str
+    assessment: str
+    score: object
+    at: str
+
+
+class GradebookState(TypedDict):
+    students: dict[str, StudentRecord]
+    assessments: dict[str, AssessmentRecord]
+    marks: list[MarkRecord]
+
+
+STATE: GradebookState = {"students": {}, "assessments": {}, "marks": []}
 LOGGER = logging.getLogger(__name__)
+
+
+def _stored_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("invalid numeric value in gradebook data")
+    return float(value)
 
 
 def load() -> None:
@@ -34,12 +69,13 @@ def pct(sid: str) -> str:
         if mark["student"] == sid:
             assessment = STATE["assessments"].get(mark["assessment"])
             if assessment is not None:
+                weight = _stored_number(assessment["weight"])
                 got += (
-                    float(mark["score"])
-                    * float(assessment["weight"])
-                    / float(assessment["total"])
+                    _stored_number(mark["score"])
+                    * weight
+                    / _stored_number(assessment["total"])
                 )
-                total += float(assessment["weight"])
+                total += weight
     if total == 0:
         return "0"
     return str(round(got, 2))
@@ -128,7 +164,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             student = parse_student(payload)
             if student.id in STATE["students"]:
                 raise ConflictError("student already exists")
-            student_record = {
+            student_record: StudentRecord = {
                 "id": student.id,
                 "name": student.name,
                 "joined": str(datetime.datetime.now()),
@@ -141,33 +177,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             assessment = parse_assessment(payload)
             if assessment.id in STATE["assessments"]:
                 raise ConflictError("assessment already exists")
-            assessment_record = {
+            new_assessment_record: AssessmentRecord = {
                 "id": assessment.id,
                 "title": assessment.title,
                 "weight": payload["weight"],
                 "total": payload["total"],
             }
-            STATE["assessments"][assessment.id] = assessment_record
+            STATE["assessments"][assessment.id] = new_assessment_record
             save()
-            return 200, assessment_record
+            return 200, new_assessment_record
 
         mark = parse_mark(payload)
         if mark.student not in STATE["students"]:
             raise NotFoundError("student not found")
-        assessment_record = STATE["assessments"].get(mark.assessment)
-        if assessment_record is None:
+        stored_assessment = STATE["assessments"].get(mark.assessment)
+        if stored_assessment is None:
             raise NotFoundError("assessment not found")
-        assessment = parse_assessment(assessment_record)
+        assessment = parse_assessment(stored_assessment)
         if mark.score > assessment.total:
             raise ValidationError("score must not exceed total")
-        STATE["marks"].append(
-            {
-                "student": mark.student,
-                "assessment": mark.assessment,
-                "score": mark.score,
-                "at": str(datetime.datetime.now()),
-            }
-        )
+        mark_record: MarkRecord = {
+            "student": mark.student,
+            "assessment": mark.assessment,
+            "score": mark.score,
+            "at": str(datetime.datetime.now()),
+        }
+        STATE["marks"].append(mark_record)
         save()
         LOGGER.info("Recorded mark for %s with score %s", mark.student, mark.score)
         return 200, {"ok": True}
@@ -180,10 +215,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] = sys.argv) -> None:
-    load()
     port = 8000
     if len(argv) > 1:
-        port = int(argv[1])
+        try:
+            port = int(argv[1])
+        except ValueError:
+            raise SystemExit("port must be a whole number from 1 to 65535") from None
+    if not 1 <= port <= 65535:
+        raise SystemExit("port must be a whole number from 1 to 65535")
+
+    load()
     logging.basicConfig(level=logging.INFO)
     LOGGER.info("gradebook on %s", port)
     http.server.HTTPServer(("", port), Handler).serve_forever()
